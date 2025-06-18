@@ -1,54 +1,80 @@
 import os
-from flask import Flask, request, render_template
+import json
+from flask import Flask, request, render_template, send_file
 from dotenv import load_dotenv
 from twilio.rest import Client
-from twilio.twiml.voice_response import VoiceResponse, Record
+from twilio.twiml.voice_response import VoiceResponse
 
 load_dotenv()
 app = Flask(__name__)
 
 # Load Twilio credentials
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 
-client = Client(TWILIO_SID, TWILIO_TOKEN)
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-@app.route("/")
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    return "Twilio Transcription Server Running!"
+    if request.method == 'POST':
+        to_number = request.form['phone']
+        call = client.calls.create(
+            url='https://hrcall.onrender.com/voice?q=0',  # ✅ updated Render URL
+            to='+918008162349',
+            from_=TWILIO_PHONE_NUMBER
+        )
+        return f"✅ Call initiated! Call SID: {call.sid}"
+    return render_template('index.html')
 
-# Call webhook
-@app.route("/voice", methods=["POST"])
+@app.route('/voice', methods=['GET', 'POST'])
 def voice():
+    q = int(request.args.get("q", 0))
+
+    with open("questions.json") as f:
+        questions = json.load(f)
+
     response = VoiceResponse()
-    response.say("Hi. Please answer the following question.")
-    response.record(
-        max_length=30,
-        transcribe=True,
-        transcribe_callback="/transcription"
-    )
+
+    if q < len(questions):
+        response.say(questions[q])
+        response.record(
+            action=f"/voice?q={q+1}",
+            method="POST",
+            maxLength=30,
+            playBeep=True,
+            timeout=3,
+            transcribe=True,
+            transcribeCallback=f"https://hrcall.onrender.com/transcribe?q={q}"  # ✅ absolute path
+        )
+    else:
+        response.say("Thank you. We have recorded your responses. Goodbye!")
+        response.hangup()
+
     return str(response)
 
-# Transcription results webhook
-@app.route("/transcription", methods=["POST"])
-def transcription():
-    transcript = request.form.get("TranscriptionText")
-    recording_url = request.form.get("RecordingUrl")
-    print("📄 Transcript:", transcript)
-    print("🔗 Recording:", recording_url)
-    return "", 200
+@app.route('/transcribe', methods=['POST'])
+def transcribe():
+    q = int(request.args.get("q", 0))
 
-# Trigger the call
-@app.route("/makecall")
-def make_call():
-    to_number = "+918008162349"  # Replace with verified number
-    call = client.calls.create(
-        to=to_number,
-        from_=TWILIO_NUMBER,
-        url="http://<your-server-url>/voice"  # use ngrok or Render URL
-    )
-    return f"Call initiated: {call.sid}"
+    with open("questions.json") as f:
+        questions = json.load(f)
 
-if __name__ == "__main__":
+    transcript = request.values.get("TranscriptionText", "").strip()
+
+    if transcript:
+        with open("responses.txt", "a") as f:
+            f.write(f"Q{q+1}: {questions[q]}\nA: {transcript}\n\n")
+
+    return '', 204
+
+@app.route('/download')
+def download_file():
+    file_path = "responses.txt"
+    try:
+        return send_file(file_path, as_attachment=True)
+    except FileNotFoundError:
+        return "❌ responses.txt not found.", 404
+
+if __name__ == '__main__':
     app.run(debug=True)
